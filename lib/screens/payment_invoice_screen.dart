@@ -21,7 +21,7 @@ class PaymentInvoiceScreen extends StatefulWidget {
   State<PaymentInvoiceScreen> createState() => _PaymentInvoiceScreenState();
 }
 
-class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
+class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> with WidgetsBindingObserver {
   late final List<ProjectMilestone> _milestones;
   late ProjectMilestone _selectedMilestone;
   late final RazorpayService _razorpayService;
@@ -32,6 +32,7 @@ class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
   final TextEditingController _phoneController = TextEditingController(text: '9063966908');
   final TextEditingController _notesController = TextEditingController();
   final TextEditingController _apiKeyController = TextEditingController();
+  final TextEditingController _baseUrlController = TextEditingController();
 
   bool _isProcessing = false;
   bool _forceSimulation = false;
@@ -40,12 +41,14 @@ class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _milestones = InvoiceMilestonesData.getDefaultMilestones();
     _selectedMilestone = widget.initialMilestone ?? _milestones[0];
     _amountController.text = _selectedMilestone.amount.toInt().toString();
 
     _razorpayService = RazorpayService();
     _apiKeyController.text = _razorpayService.apiKey;
+    _baseUrlController.text = _razorpayService.baseUrl;
 
     _razorpayService.initialize(
       onSuccess: _onPaymentSuccess,
@@ -60,6 +63,7 @@ class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _razorpayService.dispose();
     _amountController.dispose();
     _nameController.dispose();
@@ -67,7 +71,23 @@ class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
     _phoneController.dispose();
     _notesController.dispose();
     _apiKeyController.dispose();
+    _baseUrlController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _isProcessing) {
+      // Returned from Razorpay native activity.
+      // Wait a brief moment for native callbacks; if none arrive, reset processing state.
+      Future.delayed(const Duration(milliseconds: 1200), () {
+        if (mounted && _isProcessing) {
+          setState(() {
+            _isProcessing = false;
+          });
+        }
+      });
+    }
   }
 
   void _onMilestoneSelected(ProjectMilestone ms) {
@@ -89,28 +109,124 @@ class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
   }
 
   void _onPaymentFailure(PaymentResult result) {
+    if (!mounted) return;
     setState(() {
       _isProcessing = false;
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.error_outline_rounded, color: AppColors.tertiary),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                result.errorMessage ?? 'Payment was cancelled or unsuccessful.',
-                style: const TextStyle(color: Colors.white),
+    final isCancellation = result.errorCode == 2 ||
+        (result.errorMessage != null &&
+            (result.errorMessage!.toLowerCase().contains('cancel') ||
+                result.errorMessage!.toLowerCase().contains('user')));
+
+    if (isCancellation) {
+      _showCancellationDialog();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.error_outline_rounded, color: AppColors.tertiary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  result.errorMessage ?? 'Payment was cancelled or unsuccessful.',
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+          backgroundColor: const Color(0xFF2D1525),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      );
+    }
+  }
+
+  void _showCancellationDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: GlassContainer(
+              blur: 24,
+              opacity: 0.18,
+              borderRadius: 24,
+              borderColor: AppColors.tertiary.withValues(alpha: 0.4),
+              padding: const EdgeInsets.all(22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 58,
+                    height: 58,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.tertiary.withValues(alpha: 0.15),
+                      border: Border.all(
+                        color: AppColors.tertiary.withValues(alpha: 0.5),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: const Icon(
+                      Icons.cancel_outlined,
+                      color: AppColors.tertiary,
+                      size: 30,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Payment Cancelled',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'You exited the Razorpay gateway before completing the transaction. No amount was debited from your account.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: AppColors.textSecondary,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      child: const Text(
+                        'Done',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-          ],
-        ),
-        backgroundColor: const Color(0xFF2D1525),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -131,6 +247,9 @@ class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
     // Update API Key if modified
     if (_apiKeyController.text.trim().isNotEmpty) {
       _razorpayService.apiKey = _apiKeyController.text.trim();
+    }
+    if (_baseUrlController.text.trim().isNotEmpty) {
+      _razorpayService.baseUrl = _baseUrlController.text.trim();
     }
 
     await _razorpayService.openCheckout(
@@ -889,6 +1008,20 @@ class _PaymentInvoiceScreenState extends State<PaymentInvoiceScreen> {
                 labelText: 'Razorpay Key ID',
                 labelStyle: const TextStyle(color: Colors.white54, fontSize: 11),
                 helperText: 'Default test key loaded. Replace with your Razorpay live/test key anytime.',
+                helperStyle: const TextStyle(color: Colors.white38, fontSize: 10),
+                filled: true,
+                fillColor: Colors.black26,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _baseUrlController,
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+              decoration: InputDecoration(
+                labelText: 'Backend Server URL (Optional)',
+                labelStyle: const TextStyle(color: Colors.white54, fontSize: 11),
+                helperText: 'e.g. http://10.0.2.2:5000 (emulator) or http://192.168.80.124:5000 (device). Direct checkout is used if offline.',
                 helperStyle: const TextStyle(color: Colors.white38, fontSize: 10),
                 filled: true,
                 fillColor: Colors.black26,
